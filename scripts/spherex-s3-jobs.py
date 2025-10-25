@@ -59,10 +59,13 @@ class App:
         if not manifest_id and not load_id:
             raise ValueError("Error: --manifest_id or --load_id is required for querying jobs")
 
-        jobs = utils.get_pending_jobs(manifest_id=manifest_id, load_id=load_id)
+        if self.args.all:
+            jobs = utils.get_jobs(manifest_id=manifest_id, load_id=load_id)
+        else:
+            jobs = utils.get_pending_jobs(manifest_id=manifest_id, load_id=load_id)
 
         if not jobs:
-            log.info("No pending jobs found")
+            log.info("No jobs found")
             return
         for job in jobs:
             # Ensure UUIDs and other special types are JSON-serializable
@@ -74,13 +77,25 @@ class App:
                 count: Optional[int] = None, 
                 mock: bool = False):
 
+        if not manifest_id and not load_id:
+            raise ValueError("Error: --manifest_id or --load_id is required for querying jobs")
+        
         try:
-            job = utils.find_job_to_run(load_id=load_id, manifest_id=manifest_id)
+            jobs = utils.get_pending_jobs(load_id=load_id, manifest_id=manifest_id)
         except ValueError as e:
             log.error(f"Error finding job to run: {e}")
             return
-        log.info(f"Running job ID {job.id} for manifest ID {job.manifest_id}, load ID {load_id}, count {count}, mock {mock}")
+        
+        if not jobs:
+            log.info("No pending jobs found")
+            return
+        
+        if len(jobs) > 1:
+            log.error(f"Multiple pending jobs found, cannot proceed: {[job.id for job in jobs]}")
+            return
 
+        job = jobs[0]
+        log.info(f"Running job ID {job.id} for manifest ID {job.manifest_id}, load ID {load_id}, count {count}, mock {mock}")
 
         asyncio.run(uploader.run_job(job))
 
@@ -102,6 +117,7 @@ class App:
                             help="URL of the manifest service")
         parser.add_argument("--create", action="store_true")
         parser.add_argument("--query", action="store_true")
+        parser.add_argument("--all", action="store_true")
         parser.add_argument("--pending", action="store_true")
         parser.add_argument("--run", action="store_true")
         parser.add_argument("--mock", action="store_true")

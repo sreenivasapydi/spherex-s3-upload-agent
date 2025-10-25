@@ -67,14 +67,16 @@ async def run_job(job: Job):
 
     await upload_to_s3_in_batch(job, settings.S3_BUCKET_NAME)
 
+    job = get_job_by_id(job.id)
+
     log.info(f"Start time      : {job.started_at}")
     log.info(f"End   time      : {job.completed_at}")
-    log.info(f"Load ID         : {job.manifest.load_id}")
-    log.info(f"Data folders    : {', '.join(job.manifest.data_folders)}")
-    log.info(f"Total files     : {job.manifest.total_files}")
+    log.info(f"Load ID         : {manifest.load_id}")
+    log.info(f"Data folders    : {', '.join(manifest.data_folders)}")
+    log.info(f"Total files     : {manifest.total_files}")
     log.info(f"Requested Count : {job.count}")
     log.info(
-        f"Uploaded {job.uploaded_files} files, {job.manifest.total_size} in time {job.elapsed_time}"
+        f"Uploaded {job.uploaded_files} files, {manifest.total_size} in time {job.elapsed_time}"
     )
 
 
@@ -178,7 +180,7 @@ async def upload_to_s3_in_batch(job: Job, bucket_name: str):
         await handle_job_update(
             job.id,
             status=JobStatus.COMPLETED,
-            finished_at=get_current_time(),
+            completed_at=get_current_time(),
             message="Job completed",
         )
 
@@ -296,23 +298,26 @@ async def handle_job_update(
     job_id,
     message: str,
     status: Optional[JobStatus] = None,
-    finished_at: Optional[datetime] = None,
+    completed_at: Optional[datetime] = None,
     incr_uploaded_files: int = 0,
 ):
+
 
     updated_job = await update_job(
         job_id,
         status=status,
         message=message,
-        completed_at=finished_at,
+        completed_at=completed_at,
         incr_uploaded_files=incr_uploaded_files,
     )
     log.info(f"Job {job_id} updated")
     log.info(updated_job.model_dump(mode="json"))
 
+
+
     total_files = updated_job.manifest.total_files if updated_job.manifest else 0
     uploaded_files = updated_job.uploaded_files + incr_uploaded_files
-    elapsed_time = get_elapsed_time(updated_job.started_at, updated_job.updated_at)
+    elapsed_time = get_elapsed_time(updated_job.started_at, updated_job.updated_at) # type: ignore
 
     if message is not None:
         message = f"{message} elapsed {elapsed_time} [{uploaded_files}/{total_files}]"

@@ -69,10 +69,10 @@ class JobUpdate(CustomBaseModel):
     """Model for updating a job."""
     status: Optional[JobStatus] = None
     uploaded_files: Optional[int] = None
-    started_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
+    started_at: Optional[AwareDatetime] = None
+    completed_at: Optional[AwareDatetime] = None
     elapsed_time: Optional[str] = None
-    updated_at: Optional[datetime] = None
+    updated_at: Optional[AwareDatetime] = None
 
 
     # def model_dump_json(self, *args, **kwargs):

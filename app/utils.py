@@ -48,18 +48,6 @@ def find_manifest(load_id: str | None = None, manifest_id: UUID | None = None) -
     else:
         raise ValueError("Either load_id or manifest_id must be provided to find a manifest")
 
-def find_job_to_run(load_id: str | None = None, manifest_id: UUID | None = None) -> Job:
-    jobs = get_jobs(manifest_id=manifest_id, load_id=load_id)
-    if not jobs:
-        raise ValueError("No jobs found for the given manifest_id or load_id")
-    candidate_jobs = [job for job in jobs if job.status == JobStatus.PENDING]
-    if not candidate_jobs:
-        raise ValueError("No pending jobs found to run")
-    if len(candidate_jobs) > 1:
-        raise ValueError(f"Multiple candidate jobs found, selecting the first one: {[job.id for job in candidate_jobs]}")
-    
-    print(candidate_jobs[0].model_dump_json(indent=2))
-    return candidate_jobs[0]
 
 def get_job_by_id(job_id: UUID) -> Job:
     log.info(f"Querying job {job_id} from {SERVICE_URL}")
@@ -71,7 +59,7 @@ def get_job_by_id(job_id: UUID) -> Job:
     return Job(**data)
 
 def get_jobs(manifest_id: Optional[UUID], load_id: Optional[str],
-             status: Optional[JobStatus]) -> list[Job]:
+             status: Optional[JobStatus] = None) -> list[Job]:
     log.info(f"Querying jobs from {SERVICE_URL}")
     url = f"{SERVICE_URL}/jobs"
     params = {}
