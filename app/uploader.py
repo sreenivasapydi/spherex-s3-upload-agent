@@ -1,6 +1,8 @@
 #!/bin/env python
 
+from ast import increment_lineno
 import asyncio
+import stat
 from turtle import update
 from uuid import UUID
 import aiobotocore.session
@@ -11,7 +13,7 @@ from pathlib import Path
 from typing import Optional, Union
 from datetime import datetime
 from app.config import settings
-from app.models import Job, JobStatus, JobUpdate, ManifestEntry, Manifest
+from app.models import EntryUploadLog, EntryUploadStatus, EntryUploadStatus, Job, JobStatus, JobUpdate, ManifestEntry, Manifest
 from app.utils import get_current_time, get_elapsed_time, get_job_by_id, \
     get_manifest_by_id, update_job
 
@@ -152,6 +154,7 @@ async def upload_to_s3_in_batch(job: Job, bucket_name: str):
                     logger.debug(f"Worker {worker_id} uploading {entry.bucket_key}")
                     await upload_file_to_s3(
                         job,
+                        entry,
                         entry.ops_key,
                         bucket_name,
                         entry.bucket_key,
@@ -187,6 +190,7 @@ async def upload_to_s3_in_batch(job: Job, bucket_name: str):
 
 async def upload_file_to_s3(
     job: Job,
+    entry: ManifestEntry,
     file_path: Union[str, Path],
     bucket_name: str,
     bucket_key: str,
@@ -199,35 +203,48 @@ async def upload_file_to_s3(
     isn't blocked by reads.
     """
     async with semaphore:  # Limit concurrent uploads
+        entry_log = EntryUploadLog(
+            entry_id=entry.id,
+            status=EntryUploadStatus.STARTED,
+            started_at=get_current_time(),
+        )   
+        
         if job.mock:
-            await handle_job_update(
-                job.id, incr_uploaded_files=1, message=f"Uploaded {file_path} (mock)"
-            )
+            entry_log.status = EntryUploadStatus.COMPLETED
+            entry_log.completed_at = get_current_time()
+            entry_log.message = f"Uploaded {file_path} (mock)"
+            await handle_job_update(job.id, entry_log=entry_log)
             return
 
         path = Path(file_path)
-        if not path.is_file():
-            logger.error(f"Error: File {path} not found")
-            raise FileNotFoundError(path)
-
-        size = path.stat().st_size
-
         try:
+            if not path.is_file():
+                raise FileNotFoundError(path)
+            
+            size = path.stat().st_size
             if MULTIPART_ENABLED and  size >= MULTIPART_THRESHOLD and not job.aws_unsigned:
                 # Large file: use multipart upload if not anonymous
-                await upload_large_file_multipart(job, path, bucket_name, bucket_key, client)
+                await upload_large_file_multipart(job, entry, path, bucket_name, bucket_key, client)
             else:
                 # Small file: read into memory off the event loop then put_object
                 body = await asyncio.to_thread(lambda: path.read_bytes())
                 await client.put_object(Body=body, Bucket=bucket_name, Key=bucket_key)
-                await handle_job_update(job.id, incr_uploaded_files=1, message=f"Uploaded {path}")
-
         except Exception as e:
-            logger.error(f"Error uploading file {path}: {e}")
-            raise
+            entry_log.status = EntryUploadStatus.ERROR
+            entry_log.message = f"Error uploading file {path}: {e}"
+            logger.error(entry_log.message)
+            await handle_job_update(job.id, entry_log=entry_log)
+            return
+
+        entry_log.status = EntryUploadStatus.COMPLETED
+        entry_log.completed_at = get_current_time()
+        entry_log.message = f"Uploaded {file_path}"
+        await handle_job_update(job.id, entry_log=entry_log)
 
 
-async def upload_large_file_multipart(job: Job, path: Path, bucket_name: str, bucket_key: str, client):
+async def upload_large_file_multipart(job: Job, 
+                                      entry: ManifestEntry,
+                                      path: Path, bucket_name: str, bucket_key: str, client):
     """Perform a multipart upload for a large file.
 
     Reading file parts is done in threads to avoid blocking the event loop. Each
@@ -283,8 +300,6 @@ async def upload_large_file_multipart(job: Job, path: Path, bucket_name: str, bu
             MultipartUpload={"Parts": parts},
         )
 
-        await handle_job_update(job.id, incr_uploaded_files=1, message=f"Uploaded {path} (multipart)")
-
     except Exception as e:
         logger.error(f"Multipart upload failed for {path}: {e}")
         # attempt to abort
@@ -296,12 +311,16 @@ async def upload_large_file_multipart(job: Job, path: Path, bucket_name: str, bu
 
 async def handle_job_update(
     job_id,
-    message: str,
+    message: str | None = None,
     status: Optional[JobStatus] = None,
     completed_at: Optional[datetime] = None,
-    incr_uploaded_files: int = 0,
+    entry_log: EntryUploadLog | None = None
 ):
-
+    incr_uploaded_files = 0
+    if entry_log is not None and entry_log.status == EntryUploadStatus.COMPLETED:
+        incr_uploaded_files = 1
+    if message is None and entry_log is not None:
+        message = entry_log.message
 
     updated_job = await update_job(
         job_id,
@@ -310,10 +329,6 @@ async def handle_job_update(
         completed_at=completed_at,
         incr_uploaded_files=incr_uploaded_files,
     )
-    log.info(f"Job {job_id} updated")
-    log.info(updated_job.model_dump(mode="json"))
-
-
 
     total_files = updated_job.manifest.total_files if updated_job.manifest else 0
     uploaded_files = updated_job.uploaded_files + incr_uploaded_files
@@ -322,4 +337,5 @@ async def handle_job_update(
     if message is not None:
         message = f"{message} elapsed {elapsed_time} [{uploaded_files}/{total_files}]"
         # TODO job.messages.append(message)
-        logger.info(f"{message}")
+    
+    logger.info(f"{message}")

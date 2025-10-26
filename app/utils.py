@@ -113,7 +113,6 @@ async def update_job(
     url = f"{SERVICE_URL}/jobs/{job_id}"
     payload = job_update.model_dump(mode="json")
 
-    log.info(f"Job update payload: {payload}")
     with httpx.Client(timeout=60) as client:
         r = client.put(url, json=payload)
         r.raise_for_status()

@@ -2,6 +2,8 @@
 from datetime import datetime
 from enum import Enum, StrEnum
 from pathlib import Path, PosixPath
+from sre_constants import SUCCESS
+from xml.dom.pulldom import START_DOCUMENT
 from pydantic import BaseModel, ConfigDict, AwareDatetime, Field
 from uuid import UUID
 from typing import List, Optional
@@ -22,6 +24,7 @@ class CustomBaseModel(BaseModel):
 
 class ManifestEntry(CustomBaseModel):
     """Database model for a single entry in the manifest."""
+    id: UUID
     ops_key: str
     bucket_key: str
 
@@ -79,3 +82,19 @@ class JobUpdate(CustomBaseModel):
     #     kwargs.setdefault("exclude_none", True)
     #     kwargs.setdefault("exclude_unset", True)
     #     return super().model_dump_json(*args, **kwargs)
+
+
+class EntryUploadStatus(StrEnum, Enum):
+    STARTED = 'STARTED'
+    COMPLETED = 'COMPLETED'
+    ERROR = 'ERROR'
+    class Config:  
+        use_enum_values = True
+
+class EntryUploadLog(CustomBaseModel):
+    """Model for logging the upload status of a manifest entry."""
+    entry_id: UUID
+    status: EntryUploadStatus
+    message: Optional[str] = None
+    started_at: Optional[AwareDatetime] = None
+    completed_at: Optional[AwareDatetime] = None
