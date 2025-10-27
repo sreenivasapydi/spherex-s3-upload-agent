@@ -4,11 +4,14 @@ import sys
 import json
 from pathlib import Path
 from typing import Optional
+from venv import create
 import httpx
 from loguru import logger as log
 
 sys.path.append(Path(__file__).resolve().parent.parent.as_posix())
 
+
+from app.utils import create_manifest, find_manifest
 from app.utils import get_manifest_by_load_id
 from app.config import settings
 
@@ -30,34 +33,27 @@ class App:
             log.error("No action specified. Use --create, or --query.")
 
 
-    def create_manifest(self, load_id=None, manifest_file=None):
-        if not load_id:
-            raise ValueError("Error: --load_id is required for creating a manifest")
+    def create_manifest(self, load_id: str | None = None, manifest_file: str | None = None):
+
+        if load_id:
+            try:
+                manifest = find_manifest(load_id=load_id)
+                if manifest:
+                    log.info(f"Manifest already exists for load_id {load_id}: {manifest.id}")
+                    return manifest
+            except ValueError as e:
+                pass
+        
+        if not load_id and not manifest_file:
+                raise ValueError("Error: --manifest-file is required for creating a manifest")
 
         log.info(f"Creating manifest from {load_id}")
-    
-        url = f"{self.service_url}/manifests"
-        log.info(f"Posting to {url}")
-        payload = {
-            "load_id": load_id,
-            "manifest_file": manifest_file
-        }
+        manifest = create_manifest(load_id, manifest_file)         # type: ignore
 
-        with httpx.Client(timeout=60) as client:
-            r = client.post(url, json=payload)
-            try:
-                r.raise_for_status()
-            except httpx.HTTPStatusError:
-                # print response detail if available
-                try:
-                    detail = r.json()
-                except Exception:
-                    detail = r.text
-                log.error(f"Error response detail: {detail}")
-                raise
-        data = r.json()
-        log.info(f"Manifest created successfully: {data}")
-        return data
+        log.info(f"Created manifest:")
+        log.info(manifest.model_dump_json(indent=2))
+    
+        return
 
     def query_manifest(self, load_id: str):
         log.info(f"Querying manifests from {self.service_url}")
@@ -68,7 +64,7 @@ class App:
             log.error(f"Error fetching manifest: {e}")
             return
         print("Manifest found:")
-        print(json.dumps(manifest, indent=2))
+        print(manifest.model_dump_json(indent=2))
     
 
     def parse_args(self):

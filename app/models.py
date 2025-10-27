@@ -84,17 +84,28 @@ class JobUpdate(CustomBaseModel):
     #     return super().model_dump_json(*args, **kwargs)
 
 
-class EntryUploadStatus(StrEnum, Enum):
+class JobEntryStatus(StrEnum, Enum):
     STARTED = 'STARTED'
     COMPLETED = 'COMPLETED'
     ERROR = 'ERROR'
     class Config:  
         use_enum_values = True
 
-class EntryUploadLog(CustomBaseModel):
+class JobEntryLog(CustomBaseModel):
     """Model for logging the upload status of a manifest entry."""
+    id: UUID
+    job_id  : UUID
     entry_id: UUID
-    status: EntryUploadStatus
+    status: JobEntryStatus
+    message: Optional[str] = None
+    started_at: Optional[AwareDatetime] = None
+    completed_at: Optional[AwareDatetime] = None
+
+class JobEntryLogRequest(BaseModel):
+    """Model for creating a job entry log."""
+    job_id: UUID
+    entry_id: UUID
+    status: JobEntryStatus
     message: Optional[str] = None
     started_at: Optional[AwareDatetime] = None
     completed_at: Optional[AwareDatetime] = None

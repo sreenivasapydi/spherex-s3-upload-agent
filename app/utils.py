@@ -9,11 +9,27 @@ from uuid import UUID
 from loguru import logger as log
 from pydantic import AwareDatetime
 from app.config import settings
-from app.models import Job, JobStatus, JobUpdate, Manifest
+from app.models import Job, JobEntryLog, JobEntryLogRequest, JobStatus, JobUpdate, Manifest
 
 import httpx
 
 SERVICE_URL = settings.SPHEREX_UPLOAD_SERVICE_URL
+
+
+
+def  create_manifest(load_id: str, manifest_file: str) -> Manifest:
+    log.info(f"Creating manifest at {SERVICE_URL}")
+    url = f"{SERVICE_URL}/manifests"
+    payload = {
+        "load_id": load_id,
+        "manifest_file": manifest_file,
+    }
+    with httpx.Client(timeout=60) as client:
+        r = client.post(url, json=payload)
+        r.raise_for_status()
+    data = r.json()
+    return Manifest(**data)
+
 
 def get_manifest_by_load_id(load_id: str) -> Manifest:
     log.info(f"Querying manifests from {SERVICE_URL}")
@@ -118,6 +134,18 @@ async def update_job(
         r.raise_for_status()
     data = r.json()
     return Job(**data)
+
+
+async def post_entry_log(entry_log: JobEntryLogRequest) -> JobEntryLog:
+    # log.info(f"Posting job entry log for job_id {entry_log.job_id}")
+    url = f"{SERVICE_URL}/jobs/{entry_log.job_id}/entry-logs"
+    payload = entry_log.model_dump(mode="json")
+    with httpx.Client(timeout=60) as client:
+        r = client.post(url, json=payload)
+        r.raise_for_status()
+    data = r.json()
+    return JobEntryLog(**data)
+
 
 def get_current_time() -> datetime:
     """Get the current time in ISO format."""

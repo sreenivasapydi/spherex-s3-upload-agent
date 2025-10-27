@@ -13,9 +13,9 @@ from pathlib import Path
 from typing import Optional, Union
 from datetime import datetime
 from app.config import settings
-from app.models import EntryUploadLog, EntryUploadStatus, EntryUploadStatus, Job, JobStatus, JobUpdate, ManifestEntry, Manifest
+from app.models import JobEntryStatus, Job, JobEntryLogRequest, JobStatus, ManifestEntry, Manifest
 from app.utils import get_current_time, get_elapsed_time, get_job_by_id, \
-    get_manifest_by_id, update_job
+    get_manifest_by_id, post_entry_log, update_job
 
 # use loguru's logger
 from loguru import logger as log
@@ -203,14 +203,15 @@ async def upload_file_to_s3(
     isn't blocked by reads.
     """
     async with semaphore:  # Limit concurrent uploads
-        entry_log = EntryUploadLog(
+        entry_log = JobEntryLogRequest(
+            job_id=job.id,
             entry_id=entry.id,
-            status=EntryUploadStatus.STARTED,
+            status=JobEntryStatus.STARTED,
             started_at=get_current_time(),
         )   
         
         if job.mock:
-            entry_log.status = EntryUploadStatus.COMPLETED
+            entry_log.status = JobEntryStatus.COMPLETED
             entry_log.completed_at = get_current_time()
             entry_log.message = f"Uploaded {file_path} (mock)"
             await handle_job_update(job.id, entry_log=entry_log)
@@ -230,13 +231,13 @@ async def upload_file_to_s3(
                 body = await asyncio.to_thread(lambda: path.read_bytes())
                 await client.put_object(Body=body, Bucket=bucket_name, Key=bucket_key)
         except Exception as e:
-            entry_log.status = EntryUploadStatus.ERROR
+            entry_log.status = JobEntryStatus.ERROR
             entry_log.message = f"Error uploading file {path}: {e}"
             logger.error(entry_log.message)
             await handle_job_update(job.id, entry_log=entry_log)
             return
 
-        entry_log.status = EntryUploadStatus.COMPLETED
+        entry_log.status = JobEntryStatus.COMPLETED
         entry_log.completed_at = get_current_time()
         entry_log.message = f"Uploaded {file_path}"
         await handle_job_update(job.id, entry_log=entry_log)
@@ -314,10 +315,10 @@ async def handle_job_update(
     message: str | None = None,
     status: Optional[JobStatus] = None,
     completed_at: Optional[datetime] = None,
-    entry_log: EntryUploadLog | None = None
+    entry_log: JobEntryLogRequest | None = None
 ):
     incr_uploaded_files = 0
-    if entry_log is not None and entry_log.status == EntryUploadStatus.COMPLETED:
+    if entry_log is not None and entry_log.status == JobEntryStatus.COMPLETED:
         incr_uploaded_files = 1
     if message is None and entry_log is not None:
         message = entry_log.message
@@ -338,4 +339,7 @@ async def handle_job_update(
         message = f"{message} elapsed {elapsed_time} [{uploaded_files}/{total_files}]"
         # TODO job.messages.append(message)
     
+    if entry_log is not None:
+        await post_entry_log(entry_log)
+
     logger.info(f"{message}")
