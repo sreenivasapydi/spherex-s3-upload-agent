@@ -2,20 +2,22 @@
 
 from ast import increment_lineno
 import asyncio
+from functools import total_ordering
 import stat
 from turtle import update
 from uuid import UUID
 import aiobotocore.session
 from aiobotocore.config import AioConfig
 from botocore import UNSIGNED
+from httpx import get
 from loguru import logger
 from pathlib import Path
 from typing import Optional, Union
 from datetime import datetime
 from app.config import settings
 from app.models import JobEntryStatus, Job, JobEntryLogRequest, JobStatus, ManifestEntry, Manifest
-from app.utils import get_current_time, get_elapsed_time, get_job_by_id, \
-    get_manifest_by_id, post_entry_log, update_job
+from app.utils import JobUploadHandler, get_current_time, get_elapsed_time, get_job_by_id, \
+    get_manifest_by_id, post_entry_log, update_job, get_job_upload_handler
 
 # use loguru's logger
 from loguru import logger as log
@@ -65,7 +67,6 @@ async def run_job(job: Job):
         status=job.status,
         started_at=job.started_at,
     )
-    job.mock = True
 
     await upload_to_s3_in_batch(job, settings.S3_BUCKET_NAME)
 
@@ -91,7 +92,7 @@ async def upload_to_s3_in_batch(job: Job, bucket_name: str):
     manifest : Manifest = job.manifest
 
     total_files = job.count if job.count is not None else manifest.total_files
-    log.info(f"uploading {total_files} files to S3 bucket '{bucket_name}'")
+    # log.info(f"uploading {total_files} files to S3 bucket '{bucket_name}'")
 
     # Build AioConfig for aiobotocore. This config controls connection
     # pooling and retry behavior for the underlying HTTP client. Tune
@@ -115,6 +116,7 @@ async def upload_to_s3_in_batch(job: Job, bucket_name: str):
     # the worker pool size and aiobotocore's connection pool.
     semaphore = asyncio.Semaphore(settings.S3_MAX_CONCURRENCY)
     # select the entries to process
+
     if job.count is not None and manifest.entries:
         entries = manifest.entries[
             : job.count
@@ -132,6 +134,7 @@ async def upload_to_s3_in_batch(job: Job, bucket_name: str):
     if job.aws_unsigned:
         log.info("Creating S3 client with anonymous (unsigned) requests")
 
+    handler = get_job_upload_handler(job.id, len(entries))
 
     async with session.create_client("s3", config=aio_config) as client:
         # Use an asyncio.Queue with worker tasks to sustain concurrency.
@@ -152,14 +155,16 @@ async def upload_to_s3_in_batch(job: Job, bucket_name: str):
                 entry = await q.get()
                 try:
                     logger.debug(f"Worker {worker_id} uploading {entry.bucket_key}")
+                    ops_file = Path(manifest.ops_root_dir) / Path(entry.ops_key)
                     await upload_file_to_s3(
                         job,
                         entry,
-                        entry.ops_key,
+                        ops_file,
                         bucket_name,
                         entry.bucket_key,
                         client,
                         semaphore,
+                        handler=handler,
                     )
                 except Exception as e:
                     logger.error(f"Worker {worker_id} failed to upload {entry.bucket_key}: {e}")
@@ -180,12 +185,12 @@ async def upload_to_s3_in_batch(job: Job, bucket_name: str):
         await asyncio.gather(*workers, return_exceptions=True)
 
         # Finalize job
-        await handle_job_update(
-            job.id,
+        await handler.handle_job_update(
             status=JobStatus.COMPLETED,
             completed_at=get_current_time(),
             message="Job completed",
         )
+
 
 
 async def upload_file_to_s3(
@@ -196,12 +201,17 @@ async def upload_file_to_s3(
     bucket_key: str,
     client,
     semaphore: asyncio.Semaphore,
+    handler: JobUploadHandler,
 ):
     """Upload a single file to S3. For large files this uses multipart uploads.
 
     File I/O is offloaded to threads using asyncio.to_thread so the event loop
     isn't blocked by reads.
     """
+
+    manifest: Manifest = job.manifest  # type: ignore
+    total_files = manifest.total_files if manifest else 0
+
     async with semaphore:  # Limit concurrent uploads
         entry_log = JobEntryLogRequest(
             job_id=job.id,
@@ -214,7 +224,7 @@ async def upload_file_to_s3(
             entry_log.status = JobEntryStatus.COMPLETED
             entry_log.completed_at = get_current_time()
             entry_log.message = f"Uploaded {file_path} (mock)"
-            await handle_job_update(job.id, entry_log=entry_log)
+            await handler.handle_job_entry_update(entry_log=entry_log)
             return
 
         path = Path(file_path)
@@ -234,13 +244,13 @@ async def upload_file_to_s3(
             entry_log.status = JobEntryStatus.ERROR
             entry_log.message = f"Error uploading file {path}: {e}"
             logger.error(entry_log.message)
-            await handle_job_update(job.id, entry_log=entry_log)
+            await handler.handle_job_entry_update(entry_log=entry_log)
             return
 
         entry_log.status = JobEntryStatus.COMPLETED
         entry_log.completed_at = get_current_time()
         entry_log.message = f"Uploaded {file_path}"
-        await handle_job_update(job.id, entry_log=entry_log)
+        await handler.handle_job_entry_update(entry_log=entry_log)
 
 
 async def upload_large_file_multipart(job: Job, 
@@ -309,37 +319,3 @@ async def upload_large_file_multipart(job: Job,
         except Exception:
             logger.debug("Failed to abort multipart upload or upload_id missing")
         raise
-
-async def handle_job_update(
-    job_id,
-    message: str | None = None,
-    status: Optional[JobStatus] = None,
-    completed_at: Optional[datetime] = None,
-    entry_log: JobEntryLogRequest | None = None
-):
-    incr_uploaded_files = 0
-    if entry_log is not None and entry_log.status == JobEntryStatus.COMPLETED:
-        incr_uploaded_files = 1
-    if message is None and entry_log is not None:
-        message = entry_log.message
-
-    updated_job = await update_job(
-        job_id,
-        status=status,
-        message=message,
-        completed_at=completed_at,
-        incr_uploaded_files=incr_uploaded_files,
-    )
-
-    total_files = updated_job.manifest.total_files if updated_job.manifest else 0
-    uploaded_files = updated_job.uploaded_files + incr_uploaded_files
-    elapsed_time = get_elapsed_time(updated_job.started_at, updated_job.updated_at) # type: ignore
-
-    if message is not None:
-        message = f"{message} elapsed {elapsed_time} [{uploaded_files}/{total_files}]"
-        # TODO job.messages.append(message)
-    
-    if entry_log is not None:
-        await post_entry_log(entry_log)
-
-    logger.info(f"{message}")

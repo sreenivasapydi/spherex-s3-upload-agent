@@ -9,7 +9,7 @@ from uuid import UUID
 from loguru import logger as log
 from pydantic import AwareDatetime
 from app.config import settings
-from app.models import Job, JobEntryLog, JobEntryLogRequest, JobStatus, JobUpdate, Manifest
+from app.models import Job, JobEntryLog, JobEntryLogRequest, JobEntryStatus, JobStatus, JobUpdate, Manifest
 
 import httpx
 
@@ -95,12 +95,15 @@ def get_pending_jobs(manifest_id: Optional[UUID], load_id: Optional[str]) -> lis
     log.info(f"Querying pending jobs from {SERVICE_URL}")
     return get_jobs(manifest_id=manifest_id, load_id=load_id, status=JobStatus.PENDING)
 
-def create_job(manifest_id: UUID) -> Job:
+def create_job(manifest_id: UUID, mock: bool = False, count: Optional[int] = None) -> Job:
     log.info(f"Creating job for manifest_id {manifest_id}")
     url = f"{SERVICE_URL}/jobs"
     payload = {
-        "manifest_id": str(manifest_id)
+        "manifest_id": str(manifest_id),
+        "mock": mock,
     }
+    if count is not None:
+        payload["count"] = count
     log.info(f"Job creation payload: {payload}")
     with httpx.Client(timeout=60) as client:
         r = client.post(url, json=payload)
@@ -114,7 +117,7 @@ async def update_job(
         message: str | None = None,
         started_at: datetime | None = None,
         completed_at: datetime | None = None,
-        incr_uploaded_files: int = 0,
+        uploaded_files: int | None = None,
 ) -> Job:
     # log.info(f"Updating job {job_id}")
 
@@ -123,6 +126,7 @@ async def update_job(
     job_update.completed_at = completed_at
     job_update.updated_at = get_current_time()
     job_update.started_at = started_at
+    job_update.uploaded_files = uploaded_files
 
     # TODO - increment uploaded files, elapsed time, message
 
@@ -159,3 +163,42 @@ def get_elapsed_time(start_time: datetime, end_time: Optional[datetime] = None) 
     elapsed = end_time - start_time
     return str(elapsed)
 
+
+
+class JobUploadHandler:
+    """Class to handle job upload updates."""
+
+    def __init__(self, job_id: UUID, total_files: int):
+        self.job_id = job_id
+        self.total_files = total_files
+        self.started_at = get_current_time()
+        self.uploaded_files = 0
+    
+    async def handle_job_update(self, status: JobStatus, message: str, 
+                                completed_at: Optional[datetime] = None):
+        await update_job(
+            self.job_id,
+            status=status,
+            message=message,
+            completed_at=completed_at,
+            uploaded_files=self.uploaded_files
+        )
+        
+        log.info(message)
+
+    async def handle_job_entry_update(self, entry_log: JobEntryLogRequest):
+        if entry_log.status == JobEntryStatus.COMPLETED:
+            self.uploaded_files += 1
+
+        elapsed_time = get_elapsed_time(self.started_at) # type: ignore
+        message = entry_log.message
+
+        if entry_log.message is not None:
+            message = entry_log.message
+            message = f"{message} elapsed {elapsed_time} [{self.uploaded_files}/{self.total_files}]"
+        
+        await post_entry_log(entry_log)
+        log.info(message)
+
+def get_job_upload_handler(job_id: UUID, total_files: int) -> JobUploadHandler:
+    return JobUploadHandler(job_id, total_files)

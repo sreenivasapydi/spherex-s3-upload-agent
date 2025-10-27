@@ -18,7 +18,7 @@ from app.config import settings
 
 class App:
     def __init__(self):
-        self.args = None
+        self.args : argparse.Namespace
         self.load_id = None
         self.service_url = settings.SPHEREX_UPLOAD_SERVICE_URL
 

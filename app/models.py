@@ -1,5 +1,6 @@
 
 from datetime import datetime
+from doctest import SKIP
 from enum import Enum, StrEnum
 from pathlib import Path, PosixPath
 from sre_constants import SUCCESS
@@ -44,6 +45,7 @@ class Manifest(CustomBaseModel):
 
 class JobStatus(StrEnum, Enum):
     PENDING = 'PENDING'
+    SKIPPED = 'SKIPPED'
     RUNNING = 'RUNNING'
     COMPLETED = 'COMPLETED'
     ERROR = 'ERROR'

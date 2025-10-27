@@ -27,7 +27,8 @@ class App:
         load_id = self.args.load_id
 
         if self.args.create:
-            self.create_job(manifest_id=manifest_id, load_id=load_id)
+            self.create_job(manifest_id=manifest_id, load_id=load_id, 
+                            mock=self.args.mock, count=self.args.count)
         elif self.args.query:
             self.query_jobs(manifest_id=manifest_id, load_id=load_id)
         elif self.args.run:
@@ -36,7 +37,11 @@ class App:
             log.error("No action specified. Use --create, --query, or --submit.")
 
 
-    def create_job(self, load_id: Optional[str] = None, manifest_id: Optional[UUID] = None):
+    def create_job(self, 
+                   load_id: Optional[str] = None, 
+                   manifest_id: Optional[UUID] = None,
+                   mock: bool = False,
+                   count: Optional[int] = None):
         
         manifest = utils.find_manifest(load_id=load_id, manifest_id=manifest_id)
     
@@ -45,7 +50,7 @@ class App:
 
         log.info(f"Using manifest ID {manifest.id}")
         try:
-            job = utils.create_job(manifest_id=manifest.id)
+            job = utils.create_job(manifest_id=manifest.id, mock=mock, count=count)
         except httpx.HTTPStatusError as exc:
             log.error(f"failed to create job: {exc.response.json()}")
             return
