@@ -45,7 +45,7 @@ class Manifest(CustomBaseModel):
 
 class JobStatus(StrEnum, Enum):
     PENDING = 'PENDING'
-    SKIPPED = 'SKIPPED'
+    CANCELLED = 'CANCELLED'
     RUNNING = 'RUNNING'
     COMPLETED = 'COMPLETED'
     ERROR = 'ERROR'

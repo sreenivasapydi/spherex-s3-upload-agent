@@ -6,6 +6,7 @@ class Settings(BaseSettings):
     SPHEREX_UPLOAD_SERVICE_URL: str
     S3_BUCKET_NAME: str
     AWS_UNSIGNED: bool = False
+    AWS_PROFILE: str | None = None
     MAX_POOL_CONNECTIONS: int = 100
     WORKER_CONCURRENCY: int = 50
     S3_MAX_CONCURRENCY: int = 20

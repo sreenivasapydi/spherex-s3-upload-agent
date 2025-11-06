@@ -76,7 +76,7 @@ def get_job_by_id(job_id: UUID) -> Job:
 
 def get_jobs(manifest_id: Optional[UUID], load_id: Optional[str],
              status: Optional[JobStatus] = None) -> list[Job]:
-    log.info(f"Querying jobs from {SERVICE_URL}")
+    log.debug(f"Querying jobs from {SERVICE_URL}")
     url = f"{SERVICE_URL}/jobs"
     params = {}
     if manifest_id:
@@ -94,6 +94,17 @@ def get_jobs(manifest_id: Optional[UUID], load_id: Optional[str],
 def get_pending_jobs(manifest_id: Optional[UUID], load_id: Optional[str]) -> list[Job]:
     log.info(f"Querying pending jobs from {SERVICE_URL}")
     return get_jobs(manifest_id=manifest_id, load_id=load_id, status=JobStatus.PENDING)
+
+def get_running_jobs(manifest_id: Optional[UUID], load_id: Optional[str]) -> list[Job]:
+    log.info(f"Querying running jobs from {SERVICE_URL}")
+    return get_jobs(manifest_id=manifest_id, load_id=load_id, status=JobStatus.RUNNING)
+
+def get_active_jobs(manifest_id: Optional[UUID], load_id: Optional[str]) -> list[Job]:
+    log.info(f"Querying active jobs from {SERVICE_URL}")
+    jobs = []
+    jobs.extend( get_pending_jobs(manifest_id=manifest_id, load_id=load_id) )
+    jobs.extend( get_running_jobs(manifest_id=manifest_id, load_id=load_id) )
+    return jobs
 
 def create_job(manifest_id: UUID, mock: bool = False, count: Optional[int] = None) -> Job:
     log.info(f"Creating job for manifest_id {manifest_id}")
@@ -139,6 +150,27 @@ async def update_job(
     data = r.json()
     return Job(**data)
 
+
+def print_job_report(job_id: UUID, job: Job | None = None, manifest: Manifest | None = None):
+    if job is None:
+        job = get_job_by_id(job_id)
+    if manifest is None:
+        manifest = get_manifest_by_id(job.manifest_id, minimal=True)
+    load_id = manifest.load_id
+
+    log.info("")
+    log.info(f"Load-ID.    : {load_id}")
+    log.info(f"Data Folders: {' '.join(manifest.data_folders)}")
+    log.info(f"Total files : {manifest.total_files}")
+    log.info(f"Total size  : {manifest.total_size}")
+    log.info(f"S3 Bucket   : {manifest.s3_bucket_name}")
+    log.info(f"Job ID      : {job.id}")
+    log.info(f"Status      : {job.status.split('.')[-1]}")
+    log.info(f"Created at  : {job.created_at}")
+    log.info(f"Started at  : {job.started_at}")
+    log.info(f"Completed at: {job.completed_at}")
+    log.info(f"Elapsed time: {job.elapsed_time}") 
+    log.info("")
 
 async def post_entry_log(entry_log: JobEntryLogRequest) -> JobEntryLog:
     # log.info(f"Posting job entry log for job_id {entry_log.job_id}")

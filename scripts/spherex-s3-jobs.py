@@ -1,4 +1,5 @@
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -9,7 +10,6 @@ import asyncio
 
 sys.path.append(Path(__file__).resolve().parent.parent.as_posix())
 
-from app.models import JobStatus
 
 from app.config import settings
 from app import utils, uploader
@@ -29,12 +29,14 @@ class App:
         if self.args.create:
             self.create_job(manifest_id=manifest_id, load_id=load_id, 
                             mock=self.args.mock, count=self.args.count)
-        elif self.args.query:
-            self.query_jobs(manifest_id=manifest_id, load_id=load_id)
         elif self.args.run:
             self.run_job(manifest_id=manifest_id, load_id=load_id, mock=self.args.mock, count=self.args.count)
+        elif self.args.cancel:
+            self.cancel_job(manifest_id=manifest_id, load_id=load_id)
+        elif self.args.report:
+            self.report_job_status(manifest_id=manifest_id, load_id=load_id)
         else:
-            log.error("No action specified. Use --create, --query, or --submit.")
+            self.query_jobs(manifest_id=manifest_id, load_id=load_id)
 
 
     def create_job(self, 
@@ -64,14 +66,17 @@ class App:
         if not manifest_id and not load_id:
             raise ValueError("Error: --manifest_id or --load_id is required for querying jobs")
 
+        print(f"=== JOBS ==={self.args.all and ' (all)' or ' (active)'}")
         if self.args.all:
             jobs = utils.get_jobs(manifest_id=manifest_id, load_id=load_id)
-        else:
-            jobs = utils.get_pending_jobs(manifest_id=manifest_id, load_id=load_id)
-
-        if not jobs:
-            log.info("No jobs found")
-            return
+            if not jobs:
+                log.info("No jobs found")
+                return
+        else: 
+            jobs = utils.get_active_jobs(manifest_id=manifest_id, load_id=load_id)
+            if not jobs:
+                log.info("No active jobs found")
+                return
         for job in jobs:
             # Ensure UUIDs and other special types are JSON-serializable
             log.info(job.model_dump_json(indent=2))
@@ -104,7 +109,43 @@ class App:
 
         asyncio.run(uploader.run_job(job))
 
-    
+    def cancel_job(self, manifest_id: Optional[UUID] = None, load_id: Optional[str] = None):
+
+        if not manifest_id and not load_id:
+            raise ValueError("Error: --manifest_id or --load_id is required for querying jobs")
+        
+        try:
+            jobs = utils.get_active_jobs(load_id=load_id, manifest_id=manifest_id)
+        except ValueError as e:
+            log.error(f"Error finding job to cancel: {e}")
+            return
+        
+        if not jobs:
+            log.info("No active jobs found to cancel")
+            return
+        
+        for job in jobs:
+            log.info(f"Cancelling job ID {job.id}")
+            asyncio.run(utils.update_job(job.id, status=utils.JobStatus.CANCELLED))
+
+    def report_job_status(self, manifest_id: Optional[UUID] = None, load_id: Optional[str] = None):
+        if not manifest_id and not load_id:
+            raise ValueError("Error: --manifest_id or --load_id is required for querying jobs")
+        
+        try:
+            jobs = utils.get_jobs(load_id=load_id, manifest_id=manifest_id)
+        except ValueError as e:
+            log.error(f"Error finding jobs: {e}")
+            return
+        
+        if not jobs:
+            log.info("No jobs found")
+            return
+        manifest = utils.get_manifest_by_id(jobs[0].manifest_id, minimal=True)
+        log.info("")
+        for job in jobs:
+            utils.print_job_report(job.id, job=job, manifest=manifest)
+
 
     def parse_args(self) -> argparse.Namespace:
         parser = argparse.ArgumentParser(
@@ -121,10 +162,10 @@ class App:
                             required=False,
                             help="URL of the manifest service")
         parser.add_argument("--create", action="store_true")
-        parser.add_argument("--query", action="store_true")
         parser.add_argument("--all", action="store_true")
-        parser.add_argument("--pending", action="store_true")
         parser.add_argument("--run", action="store_true")
+        parser.add_argument("--cancel", action="store_true")
+        parser.add_argument("--report", action="store_true")
         parser.add_argument("--mock", action="store_true")
         parser.add_argument("--aws-unsigned", action="store_true") 
 
@@ -149,6 +190,11 @@ class App:
     def run(self):
         self.args : argparse.Namespace = self.parse_args()
         self.config_logger()
+
+        if not self.args.aws_unsigned:
+            os.environ["AWS_PROFILE"] = settings.AWS_PROFILE or ""
+            log.info(f"Using AWS profile: {os.environ['AWS_PROFILE']}")
+
         self.main()
 
 

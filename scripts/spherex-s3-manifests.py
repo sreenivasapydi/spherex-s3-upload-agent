@@ -27,10 +27,8 @@ class App:
 
         if self.args.create:
             self.create_manifest(self.args.load_id, self.args.manifest_file)
-        elif self.args.query:
-            self.query_manifest(load_id=self.load_id)
         else:
-            log.error("No action specified. Use --create, or --query.")
+            self.query_manifest(load_id=self.load_id)
 
 
     def create_manifest(self, load_id: str | None = None, manifest_file: str | None = None):
@@ -75,7 +73,6 @@ class App:
         parser.add_argument("--load-id", required=True, help="Load ID")
         parser.add_argument("--manifest-file", help="Path to manifest file")
         parser.add_argument("--create", action="store_true")
-        parser.add_argument("--query", action="store_true")
 
         args = parser.parse_args()
         return args
