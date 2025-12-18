@@ -25,9 +25,12 @@ from app.models import (
 from app.utils import (
     JobUploadHandler,
     get_current_time,
+    get_elapsed_time,
     get_job_by_id,
     get_job_upload_handler,
     get_manifest_by_id,
+    get_transfer_rate,
+    human_readable_size,
     update_job,
 )
 
@@ -96,18 +99,26 @@ async def run_job(job: Job):
 
     await upload_to_s3_in_batch(job, settings.S3_BUCKET_NAME)
 
-    job = get_job_by_id(job.id)
-
-    log.info(f"Start time      : {job.started_at}")
-    log.info(f"End   time      : {job.completed_at}")
-    log.info(f"Load ID         : {manifest.load_id}")
-    log.info(f"Data folders    : {', '.join(manifest.data_folders)}")
-    log.info(f"Total files     : {manifest.total_files}")
-    log.info(f"Requested Count : {job.count}")
-    log.info(
-        f"Uploaded {job.uploaded_files} files, {manifest.total_size} in time {job.elapsed_time}"
+    transfer_rate = get_transfer_rate(
+        job.uploaded_size_bytes, job.elapsed_time or "0:00:00"
     )
+    uploaded_size_hr = human_readable_size(job.uploaded_size_bytes)
 
+    log.info(f"Start time           : {job.started_at}")
+    log.info(f"End   time           : {job.completed_at}")
+    log.info(f"Load ID              : {manifest.load_id}")
+    log.info(f"Data folders         : {', '.join(manifest.data_folders)}")
+    log.info(f"Total files          : {manifest.total_files}")
+    log.info(f"Requested Count      : {job.count}")
+    log.info(f"IO concurrency       : {IO_CONCURRENCY} (file reads)")
+    log.info(f"Network concurrency  : {NETWORK_CONCURRENCY} (S3 uploads)")
+
+    log.info(
+        f"Uploaded {job.uploaded_files} files, {uploaded_size_hr} "
+        f"in time {job.elapsed_time} at {transfer_rate} "
+        f"io_concurrency={IO_CONCURRENCY}, "
+        f"network_concurrency={NETWORK_CONCURRENCY})"
+    )
 
 async def upload_to_s3_in_batch(job: Job, bucket_name: str):
 
@@ -239,6 +250,11 @@ async def upload_to_s3_in_batch(job: Job, bucket_name: str):
         await producer_task
         await asyncio.gather(*upload_workers, return_exceptions=True)
 
+        # Update job completion info
+        job.completed_at = get_current_time()
+        job.elapsed_time = get_elapsed_time(job.started_at, job.completed_at) # type: ignore
+        job.uploaded_files = handler.uploaded_files
+
         # Finalize job
         await handler.handle_job_update(
             status=JobStatus.COMPLETED,
@@ -293,6 +309,12 @@ async def upload_file_data_to_s3(
         log.error(entry_log.message)
         await handler.handle_job_entry_update(entry_log=entry_log)
         return
+
+    # Track uploaded bytes
+    uploaded_size = len(file_data)
+    job.uploaded_files += 1
+    job.uploaded_size_bytes += uploaded_size
+    entry_log.uploaded_size_bytes = uploaded_size
 
     entry_log.status = JobEntryStatus.COMPLETED
     entry_log.completed_at = get_current_time()

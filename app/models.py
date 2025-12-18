@@ -4,11 +4,12 @@ from doctest import SKIP
 from enum import Enum, StrEnum
 from pathlib import Path, PosixPath
 from sre_constants import SUCCESS
-from xml.dom.pulldom import START_DOCUMENT
-from pydantic import BaseModel, ConfigDict, AwareDatetime, Field
-from uuid import UUID
+from turtle import up
 from typing import List, Optional
+from uuid import UUID
+from xml.dom.pulldom import START_DOCUMENT
 
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 
 class CustomBaseModel(BaseModel):
@@ -38,6 +39,7 @@ class Manifest(CustomBaseModel):
     s3_bucket_name: str
     data_folders: List[str] = []
     total_size: str = "0B"
+    total_size_bytes: int = 0
     total_files: int = 0
     created_at: Optional[AwareDatetime] = None
     entries: Optional[List[ManifestEntry]] = None
@@ -64,6 +66,7 @@ class Job(CustomBaseModel):
     elapsed_time: Optional[str] = None
     uploaded_files: int = 0
     uploaded_size: Optional[str] = None
+    uploaded_size_bytes: int = 0
     mock: bool = False
     count: Optional[int] = None
     aws_unsigned: Optional[bool] = None
@@ -74,6 +77,7 @@ class JobUpdate(CustomBaseModel):
     """Model for updating a job."""
     status: Optional[JobStatus] = None
     uploaded_files: Optional[int] = None
+    uploaded_size_bytes: int = 0
     started_at: Optional[AwareDatetime] = None
     completed_at: Optional[AwareDatetime] = None
     elapsed_time: Optional[str] = None
@@ -111,3 +115,4 @@ class JobEntryLogRequest(BaseModel):
     message: Optional[str] = None
     started_at: Optional[AwareDatetime] = None
     completed_at: Optional[AwareDatetime] = None
+    uploaded_size_bytes: Optional[int] = None

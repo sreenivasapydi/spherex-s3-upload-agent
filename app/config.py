@@ -14,13 +14,6 @@ class Settings(BaseSettings):
     AWS_UNSIGNED: bool = False
     AWS_PROFILE: str | None = None
     
-    # Connection pool size - should be >= NETWORK_CONCURRENCY
-    MAX_POOL_CONNECTIONS: int = 110
-    
-    # Legacy setting (kept for compatibility)
-    WORKER_CONCURRENCY: int = 50
-    S3_MAX_CONCURRENCY: int = 20
-    
     # --- Pipelined Upload Settings ---
     # File I/O concurrency: disk-bound, optimal values:
     #   - NVMe SSD: 32-64

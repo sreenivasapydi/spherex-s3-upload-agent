@@ -6,12 +6,21 @@ from sys import maxsize
 from tkinter import N
 from typing import Optional
 from uuid import UUID
-from loguru import logger as log
-from pydantic import AwareDatetime
-from app.config import settings
-from app.models import Job, JobEntryLog, JobEntryLogRequest, JobEntryStatus, JobStatus, JobUpdate, Manifest
 
 import httpx
+from loguru import logger as log
+from pydantic import AwareDatetime
+
+from app.config import settings
+from app.models import (
+    Job,
+    JobEntryLog,
+    JobEntryLogRequest,
+    JobEntryStatus,
+    JobStatus,
+    JobUpdate,
+    Manifest,
+)
 
 SERVICE_URL = settings.SPHEREX_UPLOAD_SERVICE_URL
 
@@ -195,6 +204,28 @@ def get_elapsed_time(start_time: datetime, end_time: Optional[datetime] = None) 
     elapsed = end_time - start_time
     return str(elapsed)
 
+def human_readable_size(size_bytes: float = 0) -> str:
+    """Convert a list of file paths to a human-readable size string."""
+    if size_bytes == 0:
+        return "0B"
+    units = ["B", "KiB", "MiB", "GiB", "TiB"]
+    i = 0
+    while size_bytes >= 1024 and i < len(units) - 1:
+        size_bytes = size_bytes / 1024.0
+        i += 1
+    return f"{size_bytes:.1f}{units[i]}"
+
+def get_transfer_rate(size_bytes, time_str) -> str:
+    # tie_str is in format '0:00:05.123456'
+    time_parts = time_str.split(":")
+    hours = int(time_parts[0])
+    minutes = int(time_parts[1])
+    seconds = float(time_parts[2])
+    total_seconds = hours * 3600 + minutes * 60 + seconds
+    if total_seconds == 0:
+        return "0B/s"
+    rate = size_bytes / total_seconds
+    return human_readable_size(int(rate)) + "/s"
 
 
 class JobUploadHandler:
