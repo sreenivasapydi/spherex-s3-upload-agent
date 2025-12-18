@@ -1,5 +1,6 @@
+from pydantic import Field, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field
+
 
 class Settings(BaseSettings):
     """Configuration settings for the application."""
@@ -12,9 +13,31 @@ class Settings(BaseSettings):
     S3_BUCKET_NAME: str
     AWS_UNSIGNED: bool = False
     AWS_PROFILE: str | None = None
-    MAX_POOL_CONNECTIONS: int = 100
+    
+    # Connection pool size - should be >= NETWORK_CONCURRENCY
+    MAX_POOL_CONNECTIONS: int = 110
+    
+    # Legacy setting (kept for compatibility)
     WORKER_CONCURRENCY: int = 50
     S3_MAX_CONCURRENCY: int = 20
+    
+    # --- Pipelined Upload Settings ---
+    # File I/O concurrency: disk-bound, optimal values:
+    #   - NVMe SSD: 32-64
+    #   - SATA SSD: 16-32  
+    #   - HDD: 4-8
+    IO_CONCURRENCY: int = 32
+    
+    # Network upload concurrency: latency-bound, can be much higher
+    # Depends on bandwidth and S3 endpoint capacity
+    NETWORK_CONCURRENCY: int = 100
+    
+    # Buffer queue size between I/O and network stages
+    # Higher = more memory, better throughput smoothing
+    @computed_field
+    @property
+    def BUFFER_QUEUE_SIZE(self) -> int:
+        return max(self.IO_CONCURRENCY, self.NETWORK_CONCURRENCY)*2
 
     APP_ENV: str = Field(
         description="Application environment", default="development"

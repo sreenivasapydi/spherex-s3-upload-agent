@@ -1,27 +1,35 @@
 #!/bin/env python
 
-from ast import increment_lineno
 import asyncio
-from functools import total_ordering
-import stat
-from turtle import update
-from uuid import UUID
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+
 import aiobotocore.session
 from aiobotocore.config import AioConfig
 from botocore import UNSIGNED
-from httpx import get
-from loguru import logger
-from pathlib import Path
-from typing import Optional, Union
-from datetime import datetime
-from app.config import settings
-from app.models import JobEntryStatus, Job, JobEntryLogRequest, JobStatus, ManifestEntry, Manifest
-from app.utils import JobUploadHandler, get_current_time, get_elapsed_time, get_job_by_id, \
-    get_manifest_by_id, post_entry_log, update_job, get_job_upload_handler
 
 # use loguru's logger
 from loguru import logger as log
 
+from app.config import settings
+from app.models import (
+    Job,
+    JobEntryLogRequest,
+    JobEntryStatus,
+    JobStatus,
+    Manifest,
+    ManifestEntry,
+)
+from app.utils import (
+    JobUploadHandler,
+    get_current_time,
+    get_job_by_id,
+    get_job_upload_handler,
+    get_manifest_by_id,
+    update_job,
+)
 
 """
 Uploader module
@@ -30,27 +38,45 @@ This module implements a lightweight in-memory manifest/job store and
 the logic to upload files referenced by a manifest to S3. Key design
 points:
 
-- Concurrency: uploads are performed by a pool of async worker tasks
--Concurrency: uploads are performed by a pool of async worker tasks
-    consuming an asyncio.Queue. The number of workers is controlled by
-    `settings.WORKER_CONCURRENCY` so we can sustain a steady level
-    of throughput without creating thousands of tasks at once.
+- **Pipelined Architecture**: File I/O and network uploads run in parallel
+  with separate concurrency controls:
+  - File readers (ThreadPoolExecutor) feed a bounded async queue
+  - Network uploaders consume from the queue and upload to S3
+  
+- **Separate Concurrency Tuning**:
+  - IO_CONCURRENCY: Controls file read parallelism (disk-bound, 32-64 for NVMe)
+  - NETWORK_CONCURRENCY: Controls S3 upload parallelism (latency-bound, 100-200+)
 
-- Throttling: `upload_file_to_s3` also uses an asyncio.Semaphore to
-    provide a secondary throttle for S3 operations where appropriate.
+- **Memory Management**: Bounded queue prevents OOM when reading faster than uploading
 
-- Multipart uploads: large files (>= MULTIPART_THRESHOLD) are uploaded
-    using multipart uploads with parts of size PART_SIZE to avoid
-    loading enormous files into memory.
-
-- Anonymous S3 access: set `settings.AWS_ANON=True` to create unsigned
+- **Anonymous S3 access**: set `settings.AWS_ANON=True` to create unsigned
     S3 requests (useful for publicly readable buckets).
 """
 
-# Tunable constants for upload behavior
-MULTIPART_ENABLED = False
-MULTIPART_THRESHOLD = 50 * 1024 * 1024  # 50 MB - files >= this will use multipart upload
-PART_SIZE = 8 * 1024 * 1024  # 8 MB per part (>=5MB AWS minimum except last part)
+# --- Concurrency Settings ---
+IO_CONCURRENCY = settings.IO_CONCURRENCY
+NETWORK_CONCURRENCY = settings.NETWORK_CONCURRENCY
+BUFFER_QUEUE_SIZE = settings.BUFFER_QUEUE_SIZE
+
+
+_file_io_executor = None
+
+
+def get_file_io_executor(max_workers: int = IO_CONCURRENCY) -> ThreadPoolExecutor:
+    """Get or create a dedicated thread pool for file I/O operations."""
+    global _file_io_executor
+    if _file_io_executor is None:
+        _file_io_executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="file_io")
+    return _file_io_executor
+
+
+@dataclass
+class FileReadResult:
+    """Result of reading a file, ready for upload."""
+    entry: ManifestEntry
+    file_path: Path
+    data: bytes
+    error: Optional[Exception] = None
 
 
 
@@ -91,17 +117,13 @@ async def upload_to_s3_in_batch(job: Job, bucket_name: str):
     
     manifest : Manifest = job.manifest
 
-    total_files = job.count if job.count is not None else manifest.total_files
-    # log.info(f"uploading {total_files} files to S3 bucket '{bucket_name}'")
-
-    # Build AioConfig for aiobotocore. This config controls connection
-    # pooling and retry behavior for the underlying HTTP client. Tune
-    # max_pool_connections to match the desired concurrency and network
-    # characteristics.
-    # Base AioConfig for connection pooling
+    # Build AioConfig for aiobotocore. Tune max_pool_connections to match
+    # network concurrency for optimal connection reuse.
     base_aio_config_kwargs = dict(
-        max_pool_connections=settings.MAX_POOL_CONNECTIONS,
-        retries={"max_attempts": 3},
+        max_pool_connections=NETWORK_CONCURRENCY + 10,  # Slightly above concurrency
+        retries={"max_attempts": 3, "mode": "adaptive"},
+        connect_timeout=10,
+        read_timeout=60,
     )
 
     # If anonymous (unsigned) requests requested, set signature_version to UNSIGNED
@@ -110,17 +132,9 @@ async def upload_to_s3_in_batch(job: Job, bucket_name: str):
     else:
         aio_config = AioConfig(**base_aio_config_kwargs) # type: ignore
 
-
-    # Semaphore used by individual uploads to prevent too many concurrent
-    # S3 operations at once. This is a secondary throttle in addition to
-    # the worker pool size and aiobotocore's connection pool.
-    semaphore = asyncio.Semaphore(settings.S3_MAX_CONCURRENCY)
     # select the entries to process
-
     if job.count is not None and manifest.entries:
-        entries = manifest.entries[
-            : job.count
-        ]  # the entries from the 0 to count
+        entries = manifest.entries[: job.count]
     else:
         entries = manifest.entries
     
@@ -128,61 +142,102 @@ async def upload_to_s3_in_batch(job: Job, bucket_name: str):
         log.error(f"No manifest entries found for job {job.id}")
         return
 
-    # Create an aiobotocore session and client. If AWS_ANON is True the
-    # client will be configured to use unsigned (anonymous) requests.
+    # Create an aiobotocore session and client.
     session = aiobotocore.session.get_session()
     if job.aws_unsigned:
         log.info("Creating S3 client with anonymous (unsigned) requests")
 
     handler = get_job_upload_handler(job.id, len(entries))
 
+    # Initialize file I/O executor
+    io_executor = get_file_io_executor(max_workers=IO_CONCURRENCY)
+
+    log.info(f"Starting pipelined upload: {len(entries)} files")
+    log.info(f"  IO concurrency: {IO_CONCURRENCY} (file reads)")
+    log.info(f"  Network concurrency: {NETWORK_CONCURRENCY} (S3 uploads)")
+    log.info(f"  Buffer queue size: {BUFFER_QUEUE_SIZE}")
+
     async with session.create_client("s3", config=aio_config) as client:
-        # Use an asyncio.Queue with worker tasks to sustain concurrency.
-        # Producers push all work items (manifest entries) into the queue
-        # quickly, then workers continuously pull work and start uploads.
-        # This keeps a steady pipeline of uploads without allocating a
-        # huge number of tasks at once.
-        concurrency = max(1, settings.WORKER_CONCURRENCY)
-        q: "asyncio.Queue[ManifestEntry]" = asyncio.Queue()
+        # Pipelined architecture with separate stages:
+        # Stage 1: File readers (ThreadPool) -> bounded queue
+        # Stage 2: Network uploaders (async) <- bounded queue
+        
+        # Bounded queue prevents memory exhaustion when reads outpace uploads
+        file_queue: "asyncio.Queue[Optional[FileReadResult]]" = asyncio.Queue(maxsize=BUFFER_QUEUE_SIZE)
+        
+        # Semaphore for I/O concurrency (controls ThreadPool submission rate)
+        io_semaphore = asyncio.Semaphore(IO_CONCURRENCY)
+        
+        # Track completion
+        read_complete = asyncio.Event()
+        
+        async def read_file_async(entry: ManifestEntry) -> FileReadResult:
+            """Read a single file using thread pool."""
+            file_path = Path(manifest.ops_root_dir) / Path(entry.ops_key)
+            try:
+                # Offload blocking I/O to thread pool
+                data = await asyncio.get_event_loop().run_in_executor(
+                    io_executor, 
+                    file_path.read_bytes
+                )
+                return FileReadResult(entry=entry, file_path=file_path, data=data)
+            except Exception as e:
+                return FileReadResult(entry=entry, file_path=file_path, data=b'', error=e)
 
-        # Producer: enqueue all entries
-        for entry in entries:
-            await q.put(entry)
+        async def file_reader_producer():
+            """Producer: reads files and puts results into queue."""
+            async def read_and_enqueue(entry: ManifestEntry):
+                async with io_semaphore:
+                    result = await read_file_async(entry)
+                    await file_queue.put(result)
+            
+            # Create all read tasks but limit concurrency via semaphore
+            tasks = [asyncio.create_task(read_and_enqueue(entry)) for entry in entries]
+            await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Signal completion to uploaders
+            for _ in range(NETWORK_CONCURRENCY):
+                await file_queue.put(None)  # Sentinel values
+            read_complete.set()
 
-        # Worker: consumes entries from the queue and uploads them
-        async def worker(worker_id: int):
+        async def network_uploader_worker(worker_id: int):
+            """Consumer: uploads files from queue to S3."""
             while True:
-                entry = await q.get()
+                result = await file_queue.get()
+                
+                # Check for sentinel (end of work)
+                if result is None:
+                    file_queue.task_done()
+                    break
+                
                 try:
-                    logger.debug(f"Worker {worker_id} uploading {entry.bucket_key}")
-                    ops_file = Path(manifest.ops_root_dir) / Path(entry.ops_key)
-                    await upload_file_to_s3(
-                        job,
-                        entry,
-                        ops_file,
-                        bucket_name,
-                        entry.bucket_key,
-                        client,
-                        semaphore,
+                    await upload_file_data_to_s3(
+                        job=job,
+                        entry=result.entry,
+                        file_path=result.file_path,
+                        file_data=result.data,
+                        read_error=result.error,
+                        bucket_name=bucket_name,
+                        client=client,
                         handler=handler,
                     )
                 except Exception as e:
-                    logger.error(f"Worker {worker_id} failed to upload {entry.bucket_key}: {e}")
+                    log.error(f"Worker {worker_id} upload error for {result.entry.bucket_key}: {e}")
                 finally:
-                    q.task_done()
+                    file_queue.task_done()
 
-        # Start worker tasks. Each worker pulls entries from the queue and
-        # calls the upload helper. Workers run until the queue is empty
-        # and then are cancelled.
-        workers = [asyncio.create_task(worker(i)) for i in range(concurrency)]
+        # Start producer (file readers)
+        producer_task = asyncio.create_task(file_reader_producer())
+        
+        # Start consumer workers (network uploaders)
+        upload_workers = [
+            asyncio.create_task(network_uploader_worker(i)) 
+            for i in range(NETWORK_CONCURRENCY)
+        ]
 
-        # Wait until all items are processed
-        await q.join()
-
-        # Cancel workers
-        for w in workers:
-            w.cancel()
-        await asyncio.gather(*workers, return_exceptions=True)
+        # Wait for all work to complete
+        await producer_task
+        await asyncio.gather(*upload_workers, return_exceptions=True)
 
         # Finalize job
         await handler.handle_job_update(
@@ -191,131 +246,55 @@ async def upload_to_s3_in_batch(job: Job, bucket_name: str):
             message="Job completed",
         )
 
-
-
-async def upload_file_to_s3(
+async def upload_file_data_to_s3(
     job: Job,
     entry: ManifestEntry,
-    file_path: Union[str, Path],
+    file_path: Path,
+    file_data: bytes,
+    read_error: Optional[Exception],
     bucket_name: str,
-    bucket_key: str,
     client,
-    semaphore: asyncio.Semaphore,
     handler: JobUploadHandler,
 ):
-    """Upload a single file to S3. For large files this uses multipart uploads.
-
-    File I/O is offloaded to threads using asyncio.to_thread so the event loop
-    isn't blocked by reads.
+    """Upload pre-read file data to S3.
+    
+    This function receives already-read file data from the pipeline,
+    avoiding blocking I/O in the upload path. For large files (>5MB),
+    consider implementing multipart uploads.
     """
-
-    manifest: Manifest = job.manifest  # type: ignore
-    total_files = manifest.total_files if manifest else 0
-
-    async with semaphore:  # Limit concurrent uploads
-        entry_log = JobEntryLogRequest(
-            job_id=job.id,
-            entry_id=entry.id,
-            status=JobEntryStatus.STARTED,
-            started_at=get_current_time(),
-        )   
-        
-        if job.mock:
-            entry_log.status = JobEntryStatus.COMPLETED
-            entry_log.completed_at = get_current_time()
-            entry_log.message = f"Uploaded {file_path} (mock)"
-            await handler.handle_job_entry_update(entry_log=entry_log)
-            return
-
-        path = Path(file_path)
-        try:
-            if not path.is_file():
-                raise FileNotFoundError(path)
-            
-            size = path.stat().st_size
-            if MULTIPART_ENABLED and  size >= MULTIPART_THRESHOLD and not job.aws_unsigned:
-                # Large file: use multipart upload if not anonymous
-                await upload_large_file_multipart(job, entry, path, bucket_name, bucket_key, client)
-            else:
-                # Small file: read into memory off the event loop then put_object
-                body = await asyncio.to_thread(lambda: path.read_bytes())
-                await client.put_object(Body=body, Bucket=bucket_name, Key=bucket_key)
-        except Exception as e:
-            entry_log.status = JobEntryStatus.ERROR
-            entry_log.message = f"Error uploading file {path}: {e}"
-            logger.error(entry_log.message)
-            await handler.handle_job_entry_update(entry_log=entry_log)
-            return
-
+    entry_log = JobEntryLogRequest(
+        job_id=job.id,
+        entry_id=entry.id,
+        status=JobEntryStatus.STARTED,
+        started_at=get_current_time(),
+    )   
+    
+    # Handle read errors from the producer stage
+    if read_error is not None:
+        entry_log.status = JobEntryStatus.ERROR
+        entry_log.message = f"Error reading file {file_path}: {read_error}"
+        log.error(entry_log.message)
+        await handler.handle_job_entry_update(entry_log=entry_log)
+        return
+    
+    if job.mock:
         entry_log.status = JobEntryStatus.COMPLETED
         entry_log.completed_at = get_current_time()
-        entry_log.message = f"Uploaded {file_path}"
+        entry_log.message = f"Uploaded {file_path} (mock)"
         await handler.handle_job_entry_update(entry_log=entry_log)
+        return
 
-
-async def upload_large_file_multipart(job: Job, 
-                                      entry: ManifestEntry,
-                                      path: Path, bucket_name: str, bucket_key: str, client):
-    """Perform a multipart upload for a large file.
-
-    Reading file parts is done in threads to avoid blocking the event loop. Each
-    part is uploaded with client.upload_part and finally complete_multipart_upload
-    is called. On error, abort_multipart_upload is attempted.
-    """
-    # 1. initiate
     try:
-        resp = await client.create_multipart_upload(Bucket=bucket_name, Key=bucket_key)
-        upload_id = resp.get("UploadId")
+        # Data is already read - just upload
+        await client.put_object(Body=file_data, Bucket=bucket_name, Key=entry.bucket_key)
     except Exception as e:
-        logger.error(f"Failed to create multipart upload for {path}: {e}")
-        raise
+        entry_log.status = JobEntryStatus.ERROR
+        entry_log.message = f"Error uploading file {file_path}: {e}"
+        log.error(entry_log.message)
+        await handler.handle_job_entry_update(entry_log=entry_log)
+        return
 
-    parts = []
-    part_number = 1
-    try:
-        file_size = path.stat().st_size
-        offset = 0
-        while offset < file_size:
-            chunk_size = min(PART_SIZE, file_size - offset)
-
-            # Read chunk in a thread
-            def _read_chunk(p=path, off=offset, sz=chunk_size):
-                with open(p, "rb") as f:
-                    f.seek(off)
-                    return f.read(sz)
-
-            chunk = await asyncio.to_thread(_read_chunk)
-
-            # Upload part
-            upload_part_resp = await client.upload_part(
-                Bucket=bucket_name,
-                Key=bucket_key,
-                PartNumber=part_number,
-                UploadId=upload_id,
-                Body=chunk,
-            )
-
-            etag = upload_part_resp.get("ETag")
-            parts.append({"ETag": etag, "PartNumber": part_number})
-
-            logger.debug(f"Uploaded part {part_number} for {path} (size={len(chunk)})")
-
-            part_number += 1
-            offset += chunk_size
-
-        # Complete multipart upload
-        await client.complete_multipart_upload(
-            Bucket=bucket_name,
-            Key=bucket_key,
-            UploadId=upload_id,
-            MultipartUpload={"Parts": parts},
-        )
-
-    except Exception as e:
-        logger.error(f"Multipart upload failed for {path}: {e}")
-        # attempt to abort
-        try:
-            await client.abort_multipart_upload(Bucket=bucket_name, Key=bucket_key, UploadId=upload_id)
-        except Exception:
-            logger.debug("Failed to abort multipart upload or upload_id missing")
-        raise
+    entry_log.status = JobEntryStatus.COMPLETED
+    entry_log.completed_at = get_current_time()
+    entry_log.message = f"Uploaded {file_path}"
+    await handler.handle_job_entry_update(entry_log=entry_log)
