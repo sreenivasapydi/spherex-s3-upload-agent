@@ -115,4 +115,4 @@ class JobEntryLogRequest(BaseModel):
     message: Optional[str] = None
     started_at: Optional[AwareDatetime] = None
     completed_at: Optional[AwareDatetime] = None
-    uploaded_size_bytes: Optional[int] = None
+    uploaded_size_bytes: int = 0

@@ -236,6 +236,7 @@ class JobUploadHandler:
         self.total_files = total_files
         self.started_at = get_current_time()
         self.uploaded_files = 0
+        self.uploaded_size_bytes = 0
     
     async def handle_job_update(self, status: JobStatus, message: str, 
                                 completed_at: Optional[datetime] = None):
@@ -252,13 +253,19 @@ class JobUploadHandler:
     async def handle_job_entry_update(self, entry_log: JobEntryLogRequest):
         if entry_log.status == JobEntryStatus.COMPLETED:
             self.uploaded_files += 1
+            self.uploaded_size_bytes += entry_log.uploaded_size_bytes
 
         elapsed_time = get_elapsed_time(self.started_at) # type: ignore
         message = entry_log.message
 
+        transfer_rate = get_transfer_rate(
+            self.uploaded_size_bytes, elapsed_time
+        )
+
         if entry_log.message is not None:
             message = entry_log.message
-            message = f"{message} elapsed {elapsed_time} [{self.uploaded_files}/{self.total_files}]"
+            message = f"{message} elapsed {elapsed_time} {transfer_rate} " \
+                f"[{self.uploaded_files}/{self.total_files}]"
         
         await post_entry_log(entry_log)
         log.info(message)
