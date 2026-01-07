@@ -15,7 +15,6 @@ import os
 import re
 import subprocess
 from pathlib import Path
-from posixpath import dirname
 
 from aiobotocore.config import AioConfig
 from aiobotocore.paginate import Paginator
@@ -30,7 +29,7 @@ LOCAL_PATH="/stage/irsa-spherex-links-ops/qr2"
 
 class App:
     def __init__(self):
-        self.args = None
+        self.args: argparse.Namespace
 
 
     def main(self):
@@ -64,14 +63,17 @@ class App:
 
                 await self.list_keys_v2(
                     s3=s3, bucket=bucket,
-                    prefix=prefix)
+                    prefix=prefix, output_file=self.args.run_s3_ls, max_depth=0
+                )
         except KeyboardInterrupt:
             print("\nCancelling S3 operations...")
             return
 
-    async def list_keys_v2(self, s3, bucket, prefix, max_depth=0):
+    async def list_keys_v2(self, s3, bucket, prefix, output_file, max_depth=0):
         paginator: Paginator = s3.get_paginator('list_objects_v2')
         file_keys = []
+
+        fh = open(output_file, "w") if output_file else None
 
         # Normalize and clean the prefix to count depth correctly
         clean_prefix = prefix.strip('/')
@@ -95,6 +97,10 @@ class App:
                     file_keys.append(key)
                     count += 1
                     print(f'[{count:06d}] {size_str} {key}')
+                    if fh:
+                        fh.write(f'{size_str} {key}\n')
+        if fh:
+            fh.close()
 
     def run_local_ls(self):
         parent = Path(LOCAL_PATH).parent
@@ -126,6 +132,8 @@ class App:
         s3_dict = {}
         s3_file_list = []
 
+        print("S3 Path.   :", S3_PATH)
+        print("Local Path :", LOCAL_PATH)
         with open(s3_ls_out) as f:
             for line in f:
                 m = qr_regex.search(line)
@@ -156,8 +164,10 @@ class App:
             return
 
         print(f"=== {len(diff_file_list)} files are missing in S3 as compared to Local")
-        # for f in diff_file_list:
-        #     print(f)
+        if self.args.print:
+            local_dir = Path(LOCAL_PATH).parent
+            for f in diff_file_list:
+                print(f" {local_dir}/{f}")
 
     def run_subprocess_tail(self, command, output_file, working_dir=None):
         print(f"{command} {output_file} {working_dir}")
@@ -206,6 +216,11 @@ class App:
             metavar=("S3_LS", "LOCAL_LS"),
             help="Compare two ls output files (S3_LS and LOCAL_LS)"
         )
+        parser.add_argument(
+            "--print",
+            action="store_true",
+            help="Print the file list"
+            )
 
         args = parser.parse_args()
         return args
