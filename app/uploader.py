@@ -104,15 +104,14 @@ async def run_job(job: Job):
     )
     uploaded_size_hr = human_readable_size(job.uploaded_size_bytes)
 
-    log.info(f"Start time           : {job.started_at}")
-    log.info(f"End   time           : {job.completed_at}")
     log.info(f"Load ID              : {manifest.load_id}")
     log.info(f"Data folders         : {', '.join(manifest.data_folders)}")
     log.info(f"Total files          : {manifest.total_files}")
     log.info(f"Requested Count      : {job.count}")
     log.info(f"IO concurrency       : {IO_CONCURRENCY} (file reads)")
     log.info(f"Network concurrency  : {NETWORK_CONCURRENCY} (S3 uploads)")
-
+    log.info(f"Start time           : {job.started_at}")
+    log.info(f"End   time           : {job.completed_at}")
     log.info(
         f"Uploaded {job.uploaded_files} files, {uploaded_size_hr} "
         f"in time {job.elapsed_time} at {transfer_rate} "
