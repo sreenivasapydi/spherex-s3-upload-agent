@@ -23,14 +23,15 @@ from app.models import (
     ManifestEntry,
 )
 from app.utils import (
-    JobUploadHandler,
+    MessageHandler,
     get_current_time,
     get_elapsed_time,
     get_job_by_id,
-    get_job_upload_handler,
     get_manifest_by_id,
+    get_message_handler,
     get_transfer_rate,
     human_readable_size,
+    post_entry_log,
     update_job,
 )
 
@@ -157,7 +158,7 @@ async def upload_to_s3_in_batch(job: Job, bucket_name: str):
     if job.aws_unsigned:
         log.info("Creating S3 client with anonymous (unsigned) requests")
 
-    handler = get_job_upload_handler(job.id, len(entries))
+    handler = get_message_handler(len(entries))
 
     # Initialize file I/O executor
     io_executor = get_file_io_executor(max_workers=IO_CONCURRENCY)
@@ -254,12 +255,18 @@ async def upload_to_s3_in_batch(job: Job, bucket_name: str):
         job.elapsed_time = get_elapsed_time(job.started_at, job.completed_at) # type: ignore
         job.uploaded_files = handler.uploaded_files
 
-        # Finalize job
-        await handler.handle_job_update(
+        # Finalize job status
+        job.status = JobStatus.COMPLETED
+
+        await update_job(
+            job.id,
             status=JobStatus.COMPLETED,
-            completed_at=get_current_time(),
             message="Job completed",
+            completed_at=job.completed_at,
+            uploaded_files=job.uploaded_files
         )
+        
+        log.info("Job upload completed")
 
 async def upload_file_data_to_s3(
     job: Job,
@@ -269,7 +276,7 @@ async def upload_file_data_to_s3(
     read_error: Optional[Exception],
     bucket_name: str,
     client,
-    handler: JobUploadHandler,
+    handler: MessageHandler,
 ):
     """Upload pre-read file data to S3.
     
@@ -289,14 +296,16 @@ async def upload_file_data_to_s3(
         entry_log.status = JobEntryStatus.ERROR
         entry_log.message = f"Error reading file {file_path}: {read_error}"
         log.error(entry_log.message)
-        await handler.handle_job_entry_update(entry_log=entry_log)
+        await post_entry_log(entry_log)
+        await handler.handle_update(message=entry_log.message)
         return
     
     if job.mock:
         entry_log.status = JobEntryStatus.COMPLETED
         entry_log.completed_at = get_current_time()
         entry_log.message = f"Uploaded {file_path} (mock)"
-        await handler.handle_job_entry_update(entry_log=entry_log)
+        await post_entry_log(entry_log)
+        await handler.handle_update(message=entry_log.message, completed=True)
         return
 
     try:
@@ -306,7 +315,8 @@ async def upload_file_data_to_s3(
         entry_log.status = JobEntryStatus.ERROR
         entry_log.message = f"Error uploading file {file_path}: {e}"
         log.error(entry_log.message)
-        await handler.handle_job_entry_update(entry_log=entry_log)
+        await post_entry_log(entry_log)
+        await handler.handle_update(message=entry_log.message)
         return
 
     # Track uploaded bytes
@@ -318,4 +328,7 @@ async def upload_file_data_to_s3(
     entry_log.status = JobEntryStatus.COMPLETED
     entry_log.completed_at = get_current_time()
     entry_log.message = f"Uploaded {file_path}"
-    await handler.handle_job_entry_update(entry_log=entry_log)
+    await post_entry_log(entry_log)
+    await handler.handle_update(
+        message=entry_log.message, completed=True, uploaded_size_bytes=uploaded_size
+    )

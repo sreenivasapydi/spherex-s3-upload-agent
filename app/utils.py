@@ -243,67 +243,27 @@ def get_transfer_rate(size_bytes, time_str) -> str:
     return human_readable_size(int(rate)) + "/s"
 
 
-class JobUploadHandler:
-    """Class to handle job upload updates."""
-
-    def __init__(self, job_id: UUID, total_files: int):
-        self.job_id = job_id
-        self.total_files = total_files
-        self.started_at = get_current_time()
-        self.uploaded_files = 0
-        self.uploaded_size_bytes = 0
-    
-    async def handle_job_update(self, status: JobStatus, message: str, 
-                                completed_at: Optional[datetime] = None):
-        await update_job(
-            self.job_id,
-            status=status,
-            message=message,
-            completed_at=completed_at,
-            uploaded_files=self.uploaded_files
-        )
-        
-        log.info(message)
-
-    async def handle_job_entry_update(self, entry_log: JobEntryLogRequest):
-        if entry_log.status == JobEntryStatus.COMPLETED:
-            self.uploaded_files += 1
-            self.uploaded_size_bytes += entry_log.uploaded_size_bytes
-
-        elapsed_time = get_elapsed_time(self.started_at) # type: ignore
-        message = entry_log.message
-
-        transfer_rate = get_transfer_rate(
-            self.uploaded_size_bytes, elapsed_time
-        )
-
-        if entry_log.message is not None:
-            message = entry_log.message
-            message = f"{message} elapsed {elapsed_time} {transfer_rate} " \
-                f"[{self.uploaded_files}/{self.total_files}]"
-        
-        await post_entry_log(entry_log)
-        log.info(message)
-
-def get_job_upload_handler(job_id: UUID, total_files: int) -> JobUploadHandler:
-    return JobUploadHandler(job_id, total_files)
-
 class MessageHandler:
-    """Class to handle job upload updates."""
+    """Class to handle job upload progress updates."""
 
     def __init__(self, total_files: int):
         self.total_files = total_files
         self.started_at = get_current_time()
         self.uploaded_files = 0
+        self.uploaded_size_bytes = 0
     
-    async def handle_update(self, message: str, uploaded=False, error=False):
-        if uploaded or error:
+    async def handle_update(self, message: str, completed: bool = False, 
+                            uploaded_size_bytes: int = 0):
+        if completed:
             self.uploaded_files += 1
+            self.uploaded_size_bytes += uploaded_size_bytes
 
-        elapsed_time = get_elapsed_time(self.started_at) # type: ignore
+        elapsed_time = get_elapsed_time(self.started_at)  # type: ignore
+        transfer_rate = get_transfer_rate(self.uploaded_size_bytes, elapsed_time)
 
         if message is not None:
-            message = f"{message} elapsed {elapsed_time} [{self.uploaded_files}/{self.total_files}]"
+            message = f"{message} elapsed {elapsed_time} {transfer_rate} " \
+                f"[{self.uploaded_files}/{self.total_files}]"
         
         log.info(message)
 
