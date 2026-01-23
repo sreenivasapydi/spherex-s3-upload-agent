@@ -1,19 +1,19 @@
 import argparse
+import asyncio
 import os
 import sys
 from pathlib import Path
 from typing import Optional
-import httpx
 from uuid import UUID
+
+import httpx
 from loguru import logger as log
-import asyncio
 
 sys.path.append(Path(__file__).resolve().parent.parent.as_posix())
 
 
+from app import uploader, utils
 from app.config import settings
-from app import utils, uploader
-
 
 
 class App:
@@ -57,8 +57,8 @@ class App:
             log.error(f"failed to create job: {exc.response.json()}")
             return
 
-        log.info(f"Created job:")
-        log.info(job.model_dump_json(indent=2))
+        log.info("Created job:")
+        log.info(job.model_dump_json(indent=2, exclude_none=True))
 
 
 
@@ -66,20 +66,22 @@ class App:
         if not manifest_id and not load_id:
             raise ValueError("Error: --manifest_id or --load_id is required for querying jobs")
 
-        print(f"=== JOBS ==={self.args.all and ' (all)' or ' (active)'}")
-        if self.args.all:
-            jobs = utils.get_jobs(manifest_id=manifest_id, load_id=load_id)
-            if not jobs:
-                log.info("No jobs found")
-                return
-        else: 
-            jobs = utils.get_active_jobs(manifest_id=manifest_id, load_id=load_id)
-            if not jobs:
-                log.info("No active jobs found")
-                return
+        print("=== JOBS ===")
+
+        jobs = utils.get_jobs(manifest_id=manifest_id, load_id=load_id)
+        if not jobs:
+            log.info("No jobs found")
+            return
+
         for job in jobs:
             # Ensure UUIDs and other special types are JSON-serializable
-            log.info(job.model_dump_json(indent=2))
+            log.info(job.model_dump_json(indent=2, exclude_none=True))
+
+        pending_jobs = [job for job in jobs if job.status == utils.JobStatus.PENDING]
+        running_jobs = [job for job in jobs if job.status == utils.JobStatus.RUNNING]
+        completed_jobs = [job for job in jobs if job.status == utils.JobStatus.COMPLETED]
+        
+        log.info(f"=== Total jobs: {len(jobs)} (Pending: {len(pending_jobs)}, Running: {len(running_jobs)}, Completed: {len(completed_jobs)})")
 
     def run_job(self, 
                 load_id: Optional[str] = None, 
@@ -97,7 +99,7 @@ class App:
             return
         
         if not jobs:
-            log.info("No pending jobs found")
+            log.info("No pending jobs found, create a job first with --create")
             return
         
         if len(jobs) > 1:
@@ -162,7 +164,7 @@ class App:
                             required=False,
                             help="URL of the manifest service")
         parser.add_argument("--create", action="store_true")
-        parser.add_argument("--all", action="store_true")
+        parser.add_argument("--list", action="store_true")
         parser.add_argument("--run", action="store_true")
         parser.add_argument("--cancel", action="store_true")
         parser.add_argument("--report", action="store_true")

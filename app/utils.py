@@ -64,6 +64,21 @@ def get_manifest_by_id(manifest_id: UUID, minimal: bool = False) -> Manifest:
     data = r.json()
     return Manifest(**data)
 
+def list_manifests(load_id: Optional[str] = None) -> list[Manifest]:
+    log.info(f"Querying manifests from {SERVICE_URL}")
+    url = f"{SERVICE_URL}/manifests"
+    params = {}
+    if load_id:
+        params['load_id'] = load_id
+    with httpx.Client(timeout=60) as client:
+        r = client.get(url, params=params)
+        r.raise_for_status()
+    data = r.json()
+
+    # return max 4 manifests
+    if len(data) > 4:
+        data = data[:4]
+    return [Manifest(**item) for item in data]
 
 def find_manifest(load_id: str | None = None, manifest_id: UUID | None = None) -> Manifest:
     if manifest_id:
@@ -272,3 +287,25 @@ class JobUploadHandler:
 
 def get_job_upload_handler(job_id: UUID, total_files: int) -> JobUploadHandler:
     return JobUploadHandler(job_id, total_files)
+
+class MessageHandler:
+    """Class to handle job upload updates."""
+
+    def __init__(self, total_files: int):
+        self.total_files = total_files
+        self.started_at = get_current_time()
+        self.uploaded_files = 0
+    
+    async def handle_update(self, message: str, uploaded=False, error=False):
+        if uploaded or error:
+            self.uploaded_files += 1
+
+        elapsed_time = get_elapsed_time(self.started_at) # type: ignore
+
+        if message is not None:
+            message = f"{message} elapsed {elapsed_time} [{self.uploaded_files}/{self.total_files}]"
+        
+        log.info(message)
+
+def get_message_handler(total_files: int) -> MessageHandler:
+    return MessageHandler(total_files)
