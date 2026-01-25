@@ -1,4 +1,4 @@
-from pydantic import Field, computed_field
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,23 +14,10 @@ class Settings(BaseSettings):
     AWS_UNSIGNED: bool = False
     AWS_PROFILE: str | None = None
     
-    # --- Pipelined Upload Settings ---
-    # File I/O concurrency: disk-bound, optimal values:
-    #   - NVMe SSD: 32-64
-    #   - SATA SSD: 16-32  
-    #   - HDD: 4-8
-    IO_CONCURRENCY: int = 32
-    
-    # Network upload concurrency: latency-bound, can be much higher
-    # Depends on bandwidth and S3 endpoint capacity
+    # --- Upload Concurrency Settings ---
+    # Number of concurrent upload workers (controls parallelism)
+    # For 6-80MB files: 50-100 is optimal
     NETWORK_CONCURRENCY: int = 100
-    
-    # Buffer queue size between I/O and network stages
-    # Higher = more memory, better throughput smoothing
-    @computed_field
-    @property
-    def BUFFER_QUEUE_SIZE(self) -> int:
-        return max(self.IO_CONCURRENCY, self.NETWORK_CONCURRENCY)*2
 
     APP_ENV: str = Field(
         description="Application environment", default="development"

@@ -66,18 +66,27 @@ class App:
         if not manifest_id and not load_id:
             raise ValueError("Error: --manifest_id or --load_id is required for querying jobs")
 
-        print("=== JOBS ===")
-
         jobs = utils.get_jobs(manifest_id=manifest_id, load_id=load_id)
         if not jobs:
             log.info("No jobs found")
             return
-
+        pending_jobs = [job for job in jobs if job.status == utils.JobStatus.PENDING]
+        if not self.args.list:
+            if pending_jobs:
+                log.info("=== Pending Jobs ===")
+                for job in pending_jobs:
+                    log.info(job.model_dump_json(indent=2, exclude_none=True))
+                return
+            else:
+                log.info(f"Total jobs found: {len(jobs)}, No pending jobs found, "
+                         "use --list to see all jobs")
+            return
+        
+        log.info("=== All Jobs ===")
         for job in jobs:
             # Ensure UUIDs and other special types are JSON-serializable
             log.info(job.model_dump_json(indent=2, exclude_none=True))
 
-        pending_jobs = [job for job in jobs if job.status == utils.JobStatus.PENDING]
         running_jobs = [job for job in jobs if job.status == utils.JobStatus.RUNNING]
         completed_jobs = [job for job in jobs if job.status == utils.JobStatus.COMPLETED]
         
